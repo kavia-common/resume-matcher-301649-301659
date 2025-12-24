@@ -26,8 +26,10 @@ pydantic_core==2.33.1
 pyflakes==3.3.2
 Pygments==2.19.1
 pytest==8.3.5
+python-docx==1.1.2
 python-dotenv==1.1.0
 python-multipart==0.0.20
+PyPDF2==3.0.1
 PyYAML==6.0.2
 rich==14.0.0
 rich-toolkit==0.14.1

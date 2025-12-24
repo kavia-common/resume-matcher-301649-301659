@@ -42,10 +42,13 @@ class ExtractedData(BaseModel):
 
 
 class MatchResponse(BaseModel):
+    """Response payload for resume matching results."""
     score: float = Field(..., description="Match score between 0 and 100")
     matched_keywords: List[str] = Field(..., description="Keywords that appear in the resume")
     missing_keywords: List[str] = Field(..., description="Keywords from the job description that are missing in the resume")
     summary: str = Field(..., description="Short textual summary and suggestions")
+    # For frontend convenience, also provide feedback items; summary is retained for API docs/back-compat
+    feedback: List[str] = Field(default_factory=list, description="Actionable feedback items based on missing keywords")
     extracted: ExtractedData = Field(..., description="Extracted resume fields")
 
 
@@ -278,10 +281,20 @@ def health_check():
     "/match",
     response_model=MatchResponse,
     summary="Match resume against job description",
+    description="Accepts multipart/form-data with either 'resume' or 'file' for the uploaded resume and 'job_description' text.",
     tags=["Matching"],
 )
 async def match_resume(
-    resume: UploadFile = File(..., description="The resume file in PDF or DOCX format"),
+    # Accept the canonical field 'resume' if provided
+    resume: UploadFile | None = File(
+        default=None,
+        description="The resume file in PDF or DOCX format (preferred field name: 'resume')."
+    ),
+    # Also accept 'file' as an alternative field name for backward/forward compatibility
+    file: UploadFile | None = File(
+        default=None,
+        description="Alternative field name for the resume file (if frontend sends 'file')."
+    ),
     job_description: str = Form(..., description="The job description text to match against"),
 ):
     """
@@ -289,17 +302,22 @@ async def match_resume(
     job description. Returns a score and feedback including matched/missing keywords.
 
     Parameters:
-    - resume: multipart file upload (PDF or DOCX). Processed entirely in-memory.
+    - resume/file: multipart file upload (PDF or DOCX). Processed entirely in-memory.
     - job_description: job description text to extract keywords from.
 
     Returns:
     - JSON payload with:
         - score (0-100)
         - matched_keywords, missing_keywords
-        - summary
+        - summary and feedback[]
         - extracted: { name, contact, skills[], experience, education }
     """
-    if resume.content_type not in {
+    # Select whichever field was provided
+    uploaded = resume or file
+    if uploaded is None:
+        raise HTTPException(status_code=422, detail="Missing file upload. Please include 'resume' or 'file' field.")
+
+    if uploaded.content_type not in {
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         # Some browsers may send generic octet-stream; do a fallback on filename
@@ -307,14 +325,14 @@ async def match_resume(
     }:
         raise HTTPException(status_code=400, detail="Unsupported file type. Please upload a PDF or DOCX file.")
 
-    data = await resume.read()
-    filename = (resume.filename or "").lower()
+    data = await uploaded.read()
+    filename = (uploaded.filename or "").lower()
 
     # Extract text based on file type
     text = ""
-    if filename.endswith(".pdf") or resume.content_type == "application/pdf":
+    if filename.endswith(".pdf") or uploaded.content_type == "application/pdf":
         text = _extract_text_from_pdf(data)
-    elif filename.endswith(".docx") or resume.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+    elif filename.endswith(".docx") or uploaded.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         text = _extract_text_from_docx(data)
     else:
         # Try PDF first then DOCX as a fallback for octet-stream
@@ -341,12 +359,21 @@ async def match_resume(
         suggestions = "Great alignment with the job description."
 
     summary = f"Match score: {score}%. {suggestions}"
+    # Build feedback list for frontend consumption (keep concise)
+    feedback_items: List[str] = []
+    if missing:
+        feedback_items.append("Add or highlight the following keywords to improve alignment:")
+        preview = ", ".join(missing[:10])
+        feedback_items.append(preview)
+        if len(missing) > 10:
+            feedback_items.append(f"...and {len(missing) - 10} more.")
 
     return MatchResponse(
         score=score,
         matched_keywords=matched,
         missing_keywords=missing,
         summary=summary,
+        feedback=feedback_items,
         extracted=ExtractedData(
             name=name,
             contact=contact,
